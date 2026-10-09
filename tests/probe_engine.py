@@ -146,6 +146,9 @@ def main():
         print("近似分量里概率饱和到 0/1 的格子数 = %d" % sat)
 
         rec = recommend(obs, res)
+        for r, c in rec['safe']:
+            if mine[r][c] != 0:
+                fails.append('Safety proof contradicts ground truth at %s' % ((r,c),))
         print()
         print("建议：")
         print("  可安全点开 %d 格 %s" % (len(rec["safe"]), sorted(rec["safe"])[:8]))

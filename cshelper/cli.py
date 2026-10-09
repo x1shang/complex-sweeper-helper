@@ -15,7 +15,8 @@ import time
 
 from .atlas import default_atlas
 from .capture import client_rect, find_window, grab_client
-from .engine import analyze, obs_from_board, recommend
+from .engine import obs_from_board, recommend
+from .solver import analyze
 from .layout import PRESETS, Layout, fit_all, fit_zoom
 from .recognize import read_board
 
@@ -94,6 +95,11 @@ def cmd_screenshot(args):
 
 def cmd_solve(args):
     b, src = load_board(args)
+    from .controller import board_status
+    state = board_status(b)
+    if state != 'playing':
+        print('棋盘状态:', state, '（不生成对局动作）')
+        return 1 if state == 'unreadable' else 0
     obs = obs_from_board(b)
     print("来源: %s" % src)
     print("棋盘 %d×%d  质量 %.2f  四类总数 %s" % (b.w, b.h, b.quality, obs.totals))
@@ -114,11 +120,11 @@ def cmd_solve(args):
     if rec["flag_errors"]:
         print("!! 插错/多余的旗：", rec["flag_errors"])
     if rec["guesses"]:
-        print("没有可证明安全的格子，最小概率候选（星号 = 采样近似）：")
+        print("没有可证明安全的格子，最小概率候选（星号 = 模型估计）：")
         for rc, p, ex in rec["guesses"]:
             print("   %s  P(雷)=%.4f%s" % (rc, p, "" if ex else "  *"))
     if rec["approx_cells"]:
-        print("注意：%d 格落在采样近似分量里，概率仅供参考。" % len(rec["approx_cells"]))
+        print("注意：%d 格落在模型估计分量里，概率仅供参考。" % len(rec["approx_cells"]))
     return 0
 
 
@@ -144,48 +150,50 @@ def print_board_hint(b, obs, res):
 
 
 def cmd_live(args):
-    from .capture import click
-    hwnd = find_window(class_name=args.window_class) if not args.png else None
-    if not args.png and not hwnd:
-        raise SystemExit("没找到复扫雷窗口")
+    from .controller import WindowSession, board_status, choose_actions, fingerprint
+    if args.png and (args.auto_safe or args.auto):
+        raise SystemExit("离线截图不能自动点击")
+    if args.auto_safe and args.auto:
+        raise SystemExit("请选择 --auto 或 --auto-safe 之一")
+    session = None if args.png else WindowSession(args)
     overlay = None
-    if args.overlay:
+    if args.overlay and session:
         from .overlay import Overlay
-        overlay = Overlay(hwnd)
-    clicks_done = 0
+        overlay = Overlay(session.hwnd)
+    last, repeated, clicks = None, 0, 0
     try:
         while True:
-            b, src = load_board(args)
-            obs = obs_from_board(b)
-            res = analyze(obs, time_budget=args.budget)
-            rec = recommend(obs, res)
-            os.system("cls" if os.name == "nt" else "clear")
-            print("四类总数 %s   求解 %s  近似 %s" % (obs.totals, res.status, res.approx))
-            print_board_hint(b, obs, res)
-            if rec["safe"]:
-                print("可安全点开 %d 格" % len(rec["safe"]))
-            if rec["chords"]:
-                print("可安全展开 %d 处" % len(rec["chords"]))
-            if rec["flag_errors"]:
-                print("!! 旗插错了：", rec["flag_errors"])
-            if rec["guesses"] and not rec["safe"]:
-                print("只能猜：", [(rc, round(p, 3)) for rc, p, _ in rec["guesses"]])
-            if overlay:
-                overlay.update(b, obs, res)
-            if args.auto_safe and hwnd:
-                acted = False
-                for rc in rec["safe"]:
-                    x, y, cw, ch = Layout(b.w, b.h, b.z).cell_rect(*rc)
-                    click(hwnd, x + cw // 2, y + ch // 2, "left")
-                    clicks_done += 1
-                    acted = True
-                    time.sleep(args.delay)
-                if acted:
-                    time.sleep(args.settle)
-                    continue
-            time.sleep(args.interval)
+            b = session.read() if session else load_board(args)[0]
+            state = board_status(b)
+            res = analyze(obs_from_board(b),time_budget=args.budget) if state == 'playing' else None
+            print("状态:",state,"求解:",res.msg if res else "—",flush=True)
+            if res:
+                print_board_hint(b,res.obs,res)
+                if overlay:
+                    overlay.update(b,res.obs,res)
+            if state in ('won','lost','finished','unreadable'):
+                break
+            if args.auto_safe or args.auto:
+                actions = choose_actions(b,res,args.auto)
+                if not actions:
+                    print("没有可执行动作，停止")
+                    break
+                key = fingerprint(b)
+                repeated = repeated+1 if key == last else 0
+                last = key
+                if repeated >= 3:
+                    print("点击后棋盘未改变，停止")
+                    break
+                sent = session.act_batch(b,actions)
+                clicks += sent
+                print("本轮点击 %d 次，目标 %d 格" % (sent,len(actions)),flush=True)
+                time.sleep(args.settle)
+            else:
+                if args.png:
+                    break
+                time.sleep(args.interval)
     except KeyboardInterrupt:
-        print("\n已停止（本轮自动点了 %d 格）" % clicks_done)
+        print("已停止，自动点击 %d 次" % clicks)
     finally:
         if overlay:
             overlay.close()
@@ -194,7 +202,7 @@ def cmd_live(args):
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="cshelper", description="复扫雷 AI 助手（辅助，不改游戏）")
-    p.add_argument("cmd", choices=["scan", "solve", "live", "screenshot"])
+    p.add_argument("cmd", choices=["scan", "solve", "live", "screenshot", "gui"])
     p.add_argument("--png", help="离线解一张截图")
     p.add_argument("--out", default="shot.png", help="screenshot 的输出路径")
     p.add_argument("--window-class", default="ComplexSweeperMain")
@@ -212,7 +220,13 @@ def main(argv=None):
     p.add_argument("--interval", type=float, default=1.5)
     p.add_argument("--delay", type=float, default=0.05)
     p.add_argument("--settle", type=float, default=0.4)
+    p.add_argument("--auto", action="store_true", help="live: 全自动开局、安全点击和猜测")
     args = p.parse_args(argv)
+    if args.budget <= 0 or min(args.interval,args.delay,args.settle) < 0:
+        p.error('预算必须大于 0，等待间隔不能为负数')
+    if args.cmd == "gui":
+        from .gui import main as gui_main
+        return gui_main()
     return {"scan": cmd_scan, "solve": cmd_solve, "live": cmd_live,
             "screenshot": cmd_screenshot}[args.cmd](args)
 

@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.deps/
+settings.local.json

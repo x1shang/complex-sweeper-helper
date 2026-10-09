@@ -55,7 +55,7 @@ def _candidates(atlas, z, mode):
                               ("hright", FLAGMINE), ("hwrong", FLAGMINE),
                               ("hrightflag", FLAG), ("hwrongflag", FLAG)):
                 add("%s_%d" % (pre, t), kind, t)
-    add("wrongblank", FLAG, 0)
+    add("wrongblank", "wrongblank", 0)
     return out
 
 
@@ -88,6 +88,8 @@ class Board:
         self.counters = None      # 四个计雷器显示值（未标数），未开局为 None
         self.counter_cells = ()   # 每块面板占几格（调试用）
         self.quality = 0.0        # 平均匹配误差
+        self.face = None
+        self.max_error = 0.0
 
     # ---- 便捷访问 ----
     def flags_on_board(self):
@@ -156,14 +158,26 @@ def read_board(img, atlas, w, h, z, mode="complex", thresh=40.0, counter_thresh=
                 continue
             kind, val, name, d = _classify(patch, cands, thresh)
             b.cells[r][c] = Cell(kind, val)
+            b.max_error = max(b.max_error, d)
             tot += d
             n += 1
     b.quality = tot / max(n, 1)
-    b.counters, b.counter_cells = read_counters(arr, atlas, lay)
+    b.counters, b.counter_cells = read_counters(arr, atlas, lay, counter_thresh, mode)
+    # Locate the face exactly as main.zig faceLeft/faceTop do.
+    size = 24*z
+    end = lay.counters_x + lay._counter_width(z, max(4, max(b.counter_cells, default=4)))
+    timer = lay.header_x + lay.header_w - 4*z - lay._timer_width(z)
+    fx = max(lay.header_x + lay.header_w//2 - size//2, end + 6*z)
+    fx = max(lay.header_x, min(fx, timer - 6*z - size)) - 2
+    fy = lay.header_y + (lay.header_h-size)//2 - 2
+    faces = [(name, atlas.rgb(name,z), name, 0) for name in
+             ('face_normal','face_down','face_scan','face_dead','face_win') if atlas.has(name)]
+    if faces:
+        b.face = _classify(arr[fy:fy+size,fx:fx+size],faces,5.0)[0]
     return b
 
 
-def read_counters(arr, atlas, lay):
+def read_counters(arr, atlas, lay, thresh=40.0, mode='complex'):
     """读四个计雷器。返回 (值列表 或 None, 每块占几格)。"""
     z = lay.z
     led = _led_candidates(atlas, z)
@@ -186,16 +200,22 @@ def read_counters(arr, atlas, lay):
                 d = float(np.abs(carr - patch).mean())
                 if d < bd:
                     best, bd = name, d
-            if best is None or bd > 40.0:
+            if best is None or bd > thresh:
                 break
             if best == "led_blank":
                 break
             glyphs.append(best)
         cells_used.append(len(glyphs))
-        vals.append(_parse_led(glyphs))
-    if all(v is None for v in vals):
+        expected_unit = 'led_i' if mode == 'complex' else 'led_j'
+        valid = len(glyphs) >= 4
+        if idx >= 2:
+            valid = valid and glyphs[-1] == expected_unit
+        else:
+            valid = valid and all(g[4:].isdigit() for g in glyphs[(1 if glyphs and glyphs[0] == 'led_minus' else 0):])
+        vals.append(_parse_led(glyphs) if valid else None)
+    if any(v is None for v in vals):
         return None, tuple(cells_used)
-    return tuple(v if v is not None else 0 for v in vals), tuple(cells_used)
+    return tuple(vals), tuple(cells_used)
 
 
 def _parse_led(glyphs):

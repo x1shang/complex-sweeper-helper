@@ -18,6 +18,7 @@
 """
 import random
 import time
+from functools import lru_cache
 from itertools import product
 from math import lgamma, exp
 
@@ -43,6 +44,7 @@ class Obs:
         self.flag = [[0] * w for _ in range(h)]
         self.totals = None
         self.started = False
+        self.observation_error = None
 
     def nbrs(self, r, c):
         out = []
@@ -66,6 +68,12 @@ def obs_from_board(b):
                 o.value[r][c], o.blank[r][c] = 0, True
             elif k.kind in ("flag", "flagmine"):
                 o.flag[r][c] = k.val
+            elif k.kind != 'closed':
+                o.observation_error = '存在未知格或终局贴图，不能作为对局约束'
+            if k.kind == 'flagmine':
+                o.observation_error = '终局棋盘不再生成动作'
+    if getattr(b, 'max_error', 0) > 5:
+        o.observation_error = '贴图误差过大，拒绝据此求解'
     o.totals = b.totals()
     o.started = b.counters is not None
     return o
@@ -85,10 +93,11 @@ class Result:
         self.elapsed = 0.0
 
 
+@lru_cache(maxsize=512)
 def _allowed_vectors(d, k, mode):
     out = set()
     for v in product(range(k + 1), repeat=4):
-        if sum(v) > k:
+        if sum(v) > k or sum(v) == 0:
             continue
         a = sum(v[i] * TYPES[i][0] for i in range(4))
         b = sum(v[i] * TYPES[i][1] for i in range(4))
@@ -502,7 +511,7 @@ def _mcmc_component(cells, cls, rng, deadline, n_samples=SAMPLE_TARGET, burn=BUR
     return u_map, cell_map, {"samples": got, "accept": round(acc / max(tr, 1), 3)}
 
 
-def analyze(obs, seed=0, time_budget=TIME_BUDGET, exact_only=False, verbose=False):
+def analyze_legacy(obs, seed=0, time_budget=TIME_BUDGET, exact_only=False, verbose=False):
     t_start = time.time()
     rng = random.Random(seed)
     res = Result(obs)
@@ -530,7 +539,7 @@ def analyze(obs, seed=0, time_budget=TIME_BUDGET, exact_only=False, verbose=Fals
                 continue
             U = tuple(idx[q] for q in obs.nbrs(r, c) if q in idx)
             if not U:
-                if not obs.blank[r][c] and obs.value[r][c] != 0:
+                if not obs.blank[r][c]:
                     res.status = "inconsistent"
                     res.msg = "格 (%d,%d) 显示 %s，但八个邻居都已翻开" % (r, c, obs.value[r][c])
                     return res
@@ -666,7 +675,7 @@ def analyze(obs, seed=0, time_budget=TIME_BUDGET, exact_only=False, verbose=Fals
                 for s in range(1, 5):
                     m = cell_map.get((g, s))
                     if m:
-                        pt[s - 1] = sum(c * wgt.get(u, 0.0) for u, c in m.items()) / total
+                        pt[s - 1] = sum(c * wgt.get(u, 0.0) for u, c in m.items()) / (total * zs[ci])
                 res.ptype[rc] = pt
                 res.prob[rc] = sum(pt)
         er = [0.0] * 4
@@ -682,7 +691,7 @@ def analyze(obs, seed=0, time_budget=TIME_BUDGET, exact_only=False, verbose=Fals
             for u in dists[ci]:
                 lg = _multinom_log(nfree, [totals[i] - u[i] - om[i] for i in range(4)])
                 wgt[u] = 0.0 if lg is None else exp(lg)
-            zw = sum(wgt.values()) or 1.0
+            zw = sum(dists[ci][u] * wgt[u] for u in wgt) or 1.0
             for g in cells:
                 rc = closed[g]
                 pt = [0.0, 0.0, 0.0, 0.0]
@@ -699,7 +708,11 @@ def analyze(obs, seed=0, time_budget=TIME_BUDGET, exact_only=False, verbose=Fals
         pt = [er[i] / nfree for i in range(4)] if nfree else [0.0] * 4
         res.ptype[rc] = pt
         res.prob[rc] = sum(pt)
-        res.exact[rc] = True
+        res.exact[rc] = not res.approx
+    if res.approx:
+        # Global conditioning on sampled components can remove valid worlds
+        # even from an exactly enumerated component.
+        res.exact = {rc: False for rc in res.prob}
     res.elapsed = time.time() - t_start
     return res
 
@@ -713,7 +726,9 @@ def recommend(obs, res):
     out = {"safe": [], "guesses": [], "chords": [], "flag_errors": [], "approx_cells": []}
 
     def sure_safe(rc):
-        return res.exact.get(rc, False) and res.prob.get(rc, 1.0) <= 1e-12
+        if hasattr(res, 'proven_safe'):
+            return rc in res.proven_safe
+        return res.exact.get(rc, False) and res.prob.get(rc, 1.0) == 0.0
 
     if res.status != "ok":
         return out
@@ -738,3 +753,9 @@ def recommend(obs, res):
         cand = sorted(res.prob.items(), key=lambda kv: (round(kv[1], 9), -len(obs.nbrs(*kv[0]))))
         out["guesses"] = [(rc, p, res.exact.get(rc, False)) for rc, p in cand[:6]]
     return out
+
+
+def analyze(obs, seed=0, time_budget=TIME_BUDGET, exact_only=False, verbose=False, cancel=None):
+    """Default backend: global constraints and independent safety proofs."""
+    from .solver import analyze as solve
+    return solve(obs, seed, time_budget, exact_only, verbose, cancel)

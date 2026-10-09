@@ -13,6 +13,26 @@ from PIL import Image
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 
+# Win64 handles are pointer-sized; ctypes' default c_int truncates them.
+for dll, name, restype, argtypes in (
+    (user32,'FindWindowW',wintypes.HWND,[wintypes.LPCWSTR,wintypes.LPCWSTR]),
+    (user32,'GetDC',wintypes.HDC,[wintypes.HWND]),
+    (user32,'ReleaseDC',ctypes.c_int,[wintypes.HWND,wintypes.HDC]),
+    (user32,'GetClientRect',wintypes.BOOL,[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]),
+    (user32,'ClientToScreen',wintypes.BOOL,[wintypes.HWND,ctypes.POINTER(wintypes.POINT)]),
+    (user32,'PrintWindow',wintypes.BOOL,[wintypes.HWND,wintypes.HDC,wintypes.UINT]),
+    (user32,'IsWindow',wintypes.BOOL,[wintypes.HWND]),
+    (user32,'IsIconic',wintypes.BOOL,[wintypes.HWND]),
+    (gdi32,'CreateCompatibleDC',wintypes.HDC,[wintypes.HDC]),
+    (gdi32,'CreateCompatibleBitmap',wintypes.HBITMAP,[wintypes.HDC,ctypes.c_int,ctypes.c_int]),
+    (gdi32,'SelectObject',wintypes.HANDLE,[wintypes.HDC,wintypes.HANDLE]),
+    (gdi32,'DeleteObject',wintypes.BOOL,[wintypes.HANDLE]),
+    (gdi32,'DeleteDC',wintypes.BOOL,[wintypes.HDC]),
+    (gdi32,'GetDIBits',ctypes.c_int,[wintypes.HDC,wintypes.HBITMAP,wintypes.UINT,wintypes.UINT,ctypes.c_void_p,ctypes.c_void_p,wintypes.UINT]),
+):
+    fn = getattr(dll,name)
+    fn.restype, fn.argtypes = restype,argtypes
+
 CLASS_MAIN = "ComplexSweeperMain"
 PW_CLIENTONLY = 0x00000001
 SRCCOPY = 0x00CC0020
@@ -75,13 +95,14 @@ def grab_client(hwnd):
     hdc = user32.GetDC(hwnd)
     mem = gdi32.CreateCompatibleDC(hdc)
     bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
-    gdi32.SelectObject(mem, bmp)
+    old = gdi32.SelectObject(mem, bmp)
     ok = user32.PrintWindow(hwnd, mem, PW_CLIENTONLY)
-    if not ok:  # 退化：直接从屏幕 DC 拷
-        screen = user32.GetDC(0)
-        gdi32.BitBlt(mem, 0, 0, w, h, screen, client_origin(hwnd)[0],
-                     client_origin(hwnd)[1], SRCCOPY)
-        user32.ReleaseDC(0, screen)
+    if not ok:
+        gdi32.SelectObject(mem, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem)
+        user32.ReleaseDC(hwnd, hdc)
+        raise OSError('PrintWindow 失败，拒绝使用可能被遮挡的屏幕图像')
 
     class BITMAPINFOHEADER(ctypes.Structure):
         _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
@@ -99,10 +120,13 @@ def grab_client(hwnd):
     bi.biBitCount = 32
     bi.biCompression = 0
     buf = ctypes.create_string_buffer(w * h * 4)
-    gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bi), 0)
+    gdi32.SelectObject(mem, old)
+    lines = gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bi), 0)
     gdi32.DeleteObject(bmp)
     gdi32.DeleteDC(mem)
     user32.ReleaseDC(hwnd, hdc)
+    if lines != h:
+        raise OSError('GetDIBits 未读取完整图像')
     arr = np.frombuffer(buf.raw, dtype=np.uint8).reshape(h, w, 4)[:, :, 2::-1]
     return Image.fromarray(arr.copy())
 
@@ -154,3 +178,22 @@ def click(hwnd, cx, cy, button="left"):
 
 def focus(hwnd):
     user32.SetForegroundWindow(hwnd)
+
+
+def click_message(hwnd, cx, cy, button='left'):
+    """Send paired client messages to the pinned game HWND, without cursor motion."""
+    if not user32.IsWindow(hwnd) or user32.IsIconic(hwnd):
+        raise OSError('目标窗口不可用')
+    fn = user32.SendMessageTimeoutW
+    fn.argtypes = [wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM,
+                   wintypes.UINT,wintypes.UINT,ctypes.POINTER(ctypes.c_size_t)]
+    fn.restype = ctypes.c_size_t
+    down,up,key = {'left':(0x201,0x202,1),'right':(0x204,0x205,2)}[button]
+    result = ctypes.c_size_t()
+    pos = (cy << 16) | (cx & 0xffff)
+    try:
+        if not fn(hwnd,down,key,pos,2,1000,ctypes.byref(result)):
+            raise OSError('游戏未响应鼠标按下')
+    finally:
+        if not fn(hwnd,up,0,pos,2,1000,ctypes.byref(result)):
+            raise OSError('游戏未响应鼠标释放')

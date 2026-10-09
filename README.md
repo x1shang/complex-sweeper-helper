@@ -1,137 +1,81 @@
-# 复扫雷 AI 助手（cshelper）
+# 复扫雷 AI 助手
 
-给 [复扫雷 Complexweeper](https://github.com/Yueqing-Chen/complexweeper-A-minesweeper-game)（[你的 fork](https://github.com/x1shang/complexweeper-A-minesweeper-game)）写的**外部辅助程序**：
-读游戏窗口 → 识别棋盘 → 解 5 态约束 → 给概率和建议 → 可选地在屏幕上叠热力图 / 自动点开"已证明安全"的格子。
+适配 [Yueqing-Chen/Complexweeper](https://github.com/Yueqing-Chen/complexweeper-A-minesweeper-game) 的外部助手，使用 [wangyuanchuan2022/minesweeper_help](https://github.com/wangyuanchuan2022/minesweeper_help) 的 Qt 界面外壳。
 
-游戏本体一行都不用改。
+支持 **完整自动对局**：识别窗口 → 首次开局 → 证明安全并点击 → 无安全格时按估计风险猜测 → 胜利或失败停止。游戏本体无需修改。
 
-## 为什么复扫雷的助手和原版扫雷的助手不是一回事
+## 启动
 
-`minesweeper_help`（wangyuanchuan2022）那套的核心假设在复扫雷里全部失效：
+Windows + Python 3.10 或以上。当前工作目录已安装项目内依赖 `.deps`，直接双击 **`launch.bat`**，或：
 
-| 原版扫雷 | 复扫雷 |
-|---|---|
-| 数字 = 邻域**雷数**，一个标量约束 | 数字 = 邻域雷之和的**模长** `a²+b²`（闵可夫斯基模式 `a²−b²`） |
-| 每格 2 态：雷 / 非雷 | 每格 **5 态**：空 / `+1` / `−1` / `+i` / `−i` |
-| `cnt9+cnt10==数字` 就能推 | 还得区分实/虚、正负；`25` 甚至对应 5 颗或 7 颗雷 |
-| 空白和 0 是一回事 | **空白 = 八邻真的没雷；显示 0 = 八邻全是抵消对**（至少 2 颗雷） |
-| 概率 = 组合数加权 | 概率 = 组合数加权 **+ 4 类雷的多项式系数** |
-| 没有"展开"操作 | 有 `展开`（chord）：旗的实虚计数匹配时可一次翻开多格，错了就输 |
-
-所以本项目是**重写**，不是移植。可复用的只有工程外骨骼（窗口定位、截图、增量重扫、鼠标注入、热力图）。
-
-## 用法
-
-```bash
-python -m cshelper.cli scan                       # 读当前游戏窗口，打印棋盘
-python -m cshelper.cli solve --png board.png      # 离线解一张截图
-python -m cshelper.cli screenshot --out a.png     # 存一张客户区截图
-python -m cshelper.cli live                       # 循环辅助（只读，不动鼠标）
-python -m cshelper.cli live --overlay             # 叠概率热力图
-python -m cshelper.cli live --auto-safe           # 自动点开"已证明安全"的格子
+```powershell
+python -m cshelper.gui
 ```
 
-依赖：`numpy` + `Pillow`（**不需要** OpenCV / pywin32 / pyautogui / PyQt）。
-窗口交互全部用 `ctypes` 直接调 Win32。
+换电脑后先运行 `setup.bat`，或 `python -m pip install -r requirements.txt`。
 
-### 常用参数
+1. 在“设置”中指定含 `素材/图集.json`、`素材/图集.png` 的复扫雷目录。默认使用旁边的 `../complexweeper`，也可设置 `CS_GAME_DIR`。
+2. 选择与游戏一致的 `complex`（圆复数）或 `hyper`（闵可夫斯基）。棋盘尺寸支持自动识别；窄棋盘存在尺寸歧义时选择具体难度或自定义宽高。
+3. 点击“启动复扫雷”，或自行运行游戏。按钮优先使用本项目 `_lab/complexweeper.exe`，其次寻找设置目录中的游戏程序。
+4. “自动”完成一局；“帮助人类”显示概率图；“截图帮助”读取客户区 PNG；“点击确定方格”连续执行安全动作，遇到需要猜测时停止。
+5. “停止”或助手窗口内的 Esc 取消当前任务。GUI 求解在工作线程中运行；停止后不会排队执行后续点击。
 
-- `--preset beginner|intermediate|expert`、`--w/--h`、`--zoom 1|2|3`
-  （一般不用给：`client_h = 150z + 16z·h` 能自动反解出缩放和棋盘尺寸）
-- `--mode complex|hyper`（圆复数 / 闵可夫斯基）
-- `--game-dir`：复扫雷仓库路径（默认 `../complexweeper`，用来读 `素材/图集.*`）
+自动模式允许猜雷，**不保证通关或特定胜率**。概率旁的 `*` 是有界模型估计，不是精确概率。蓝框格经过独立安全证明。
 
-## 它是怎么工作的
+## 命令行
 
+```powershell
+python -m cshelper.cli scan
+python -m cshelper.cli solve --png _lab/demo.png --budget 5
+python -m cshelper.cli live --auto --preset beginner --budget 5
+python -m cshelper.cli live --auto --mode hyper --preset beginner
+python -m cshelper.cli live --auto-safe
+python -m cshelper.cli live --overlay
+python -m cshelper.cli screenshot --out board.png
 ```
-抓客户区 (PrintWindow)          识别                         求解                        建议
-─────────────────────────  ────────────────────────  ──────────────────────────  ──────────────────
-FindWindow("ComplexSweeper")  布局几何 = main.zig 的      5 态约束 + 四类雷总数       可证明安全的格子
-GetClientRect                layout() 逐行复刻          连通分量分解                可安全展开的 chord
-反解 (w,h,zoom)              逐格 16z×16z 取像素        小分量: 精确枚举            旗插错了的格子
-PrintWindow(PW_CLIENTONLY)   与 图集.png 贴图最近邻比对  大分量: MCMC 均匀采样       最小概率候选
-                             四个计雷器 LED 逐一识别      分量间按多项式系数加权
-```
 
-### 1. 识别（已验证 pixel-perfect）
+通用参数：`--game-dir`、`--mode complex|hyper`、`--preset beginner|intermediate|expert`、`--w/--h`、`--zoom 1|2|3`、`--budget 秒`。离线截图不能启用自动点击；命令行 Ctrl+C 停止。
 
-* 窗口类名 `ComplexSweeperMain`（`main.zig:10`）。
-* 客户区尺寸唯一决定一切几何：`client_h = 150z + 16z·h`，`client_w = max(棋盘宽, 表头最小宽) + 18z`
-  → 反解 `(w, h, z)`。实测 4 张 16×16 图（z=1/2/3 + 闵可夫斯基）全部反解正确。
-* 每格取 16z×16z 像素，与 `素材/图集.png` 里的贴图做最近邻比对
-  （24 个圆复数显示值 / 39 个闵可夫斯基显示值 / 四种旗 / 雷 / 结算贴图）。
-  实测**平均匹配误差 0.00、0 个未知格**——游戏里的 StretchBlt(COLORONCOLOR) 就是整数倍最近邻放大。
-* 四个计雷器：LED 13z×23z 逐格识别数字、负号、`i`/`j` 单位、空格。
-  实测与 `--dump` 的真值**逐位一致**（`counterValue= 8 -9 9 -8`、`panelCells= 4 4 4 4`）。
-  ⚠️ 符号约定：第 2/4 个计雷器显示的是 `−unmarked`（`main.zig:149-155`），要取反。
-  四类雷总数 = 计雷器显示值 + 棋盘上已插的旗。
+## 内核
 
-### 2. 求解
+默认入口 `engine.analyze()` 转到 `solver.py`，使用 Z3 的布尔与整数约束。旧枚举/MCMC 后端保留为 `engine.analyze_legacy()`，仅供实验和旧诊断脚本参考，自动对局不使用它。
 
-* 约束：每个已翻开格 `d` 要求 `a²+b² = d`（或 `a²−b² = d`），`a,b` 是它未翻开邻居的类型计数之差；
-  **空白格是"全空"约束**（不是"抵消"）。
-* 全局：四类雷总数；无约束的"自由格"用多项式系数加权解析处理。
-* 小分量精确枚举（节点预算 + 墙钟截止）；大分量（实测中级局面有一个 **56 格 / 59 约束**的分量，
-  裸空间 5⁵⁶）退化为 **MCMC 均匀采样**：单格换态 + 约束块移动 + 区域重采样，
-  三种提议都保持对称，所以平稳分布是可行赋值上的均匀分布。
-* 概率 = `Σ 采样权重 × Mult(自由格剩余雷数) / 总权重`。
+- 每格五态：空、+1、−1、+i、−i。双曲模式用 +j、−j，数值约束改为 `a²−b²`。
+- 已开数字的内部值是模长的平方 D。空白严格要求邻居全空；数字 0 要求邻居存在雷，不能与空白混同。
+- 四类全局总数 = LED 剩余数量 + 对应旗帜数量。旗本身不作为真雷约束，允许发现错旗。
+- 小局面枚举所有边界赋值。无约束格用整数多项式组合数积分，避免枚举自由区域，也避免浮点 `exp` 溢出。
+- 大局面受时间和 2048 个模型上限约束。模型枚举不是均匀抽样，其频率仅作为猜测排序；使用少量全局先验平滑，避免把未观察到的状态当成不可能。
+- 安全证明单独查询“这些候选格中至少一个是雷”是否不可满足。只有 UNSAT 或完整计数的零支持才产生安全格；超时、近似 0、四类总数矛盾均不会生成安全证明。
+- 每轮连续翻开所有已证明安全的格子，再统一求解。批内只做识别核对，跳过自动展开的格子；遇到安全格上的错旗连续右键撤旗后翻开。自动流程无需猜测旗的具体类型，也不依赖展开动作。
 
-### 3. 建议
+## 窗口与界面
 
-* **安全保证只来自精确枚举或解析计算**。采样得到的 0 概率**不算**安全
-  （早期版本因为这个把真雷说成安全格，已修）。
-* 额外给出"可安全展开（chord）"：该格所有未插旗的未开邻居都可证明无雷时，
-  展开要么成功、要么判据不过（判据不过只是提示，不会输），所以可以放心点。
-* 会指出插错的旗。
+- `controller.py`：GUI 与 CLI 共用的状态机、动作选择与窗口会话。
+- `capture.py`：完整 Win64 句柄声明，PrintWindow 客户区截图，向固定游戏 HWND 发送成对鼠标消息，不移动系统鼠标。
+- 批次开始前核对棋盘；批内允许正常翻开和空白展开，原有线索、总数或棋盘尺寸变化则丢弃剩余动作；窗口关闭/最小化、识别异常、点击无变化都会停止。
+- 识别未知格、LED 部分缺失、模式单位不匹配及终局贴图，不把这些情况当成正常未开格。
+- `gui.py`：原 Qt 外壳适配；设置、自动日志、概率表格、四类概率悬停提示、截图分析和取消。
+- `cshelper/vendor/wyc`：来自本地 `mshelp` 的原界面、背景与图标。来源与权利说明见 `THIRD_PARTY.md`。不依赖 `mshelp` 的求解器、配置或当前工作目录。
 
 ## 验证
 
-```bash
-python tests/probe_offline.py     # 识别自检：反解 + 逐格匹配（应 0 误差 0 未知）
-python tests/probe_engine.py      # 端到端：用 demo-lose 的"揭示雷盘"当真值反查
-python tests/diag_scale.py        # 约束图规模
-python tests/diag_mcmc.py         # 采样链活跃度
+```powershell
+python -m unittest discover -s tests -p "test_*.py" -v
+python tests/probe_offline.py
+python tests/probe_engine.py
+# 先关闭已有游戏；此测试仅启动并关闭它自己创建的游戏进程
+python tests/probe_autoplay.py --exe _lab/complexweeper.exe
 ```
 
-`tests/probe_engine.py` 的做法：`复扫雷.exe --shot x.png --dump x.txt --demo-lose` 会渲染一张
-**所有雷都被揭示**的图，于是可以当标准答案：
+2026-10-09 当前环境实测：
 
-* 揭示的雷贴图数出的四类数量 == `--dump` 的 `type_total` ✅
-* 26 个已翻开格的数字 == 用真雷盘算出的线索，**不符 0 个** ✅
-* 引擎的解空间里真值从未被判成"必然安全/必然有雷"（精确分量）✅
+- 40 个随机小棋盘（两种模式）与独立五态穷举的逐格、逐类型概率一致。
+- 数字 0 / 空白、错旗、取消、1200 格自由区域组合权重、自动动作状态门控测试通过。
+- 4 张已有截图（z=1/2/3 与 hyper）识别回归通过。
+- `demo.png` 的 13 个安全证明与揭示雷盘真值一致。
+- 真实初级窗口：圆复数自动胜利（13 次点击）、hyper 自动胜利（14 次点击）；高级测试局自动踩雷后停止。
+- 真实窗口验证过取消和过期棋盘拒绝；GUI 工作线程、概率表渲染和离线禁点验证通过。
 
-真值素材的生成（需要已下载的 `复扫雷.exe`）：
+以上是功能回归，不是胜率统计。复杂中高级局面的估计仍有偏差；预算不足时可能找不到合法模型而停止。暂未实现最优胜率搜索、连续多局刷局和独立 EXE 打包。
 
-```bash
-复扫雷.exe --shot _lab/demo.png      --demo      --zoom1 --dump _lab/demo.txt
-复扫雷.exe --shot _lab/demo-lose.png --demo-lose --zoom1 --dump _lab/demo-lose.txt
-复扫雷.exe --shot _lab/hyper.png     --demo-hyper --zoom2
-```
-
-## 已知限制（重要）
-
-1. **大分量的概率是近似的**。中级局面实测：56 格的分量里仍有约 34 格在 4000 次采样中取值不变
-   （概率饱和到 0/1），40 颗真雷里有 3 颗被采样误排成概率 0。
-   所以这些格子的概率标了 `*`，且**不会**被当作"安全格"推荐。
-2. 因此在中级/高级的复杂局面下，助手经常只能给"没有可证明安全的格子"——这是**正确**的结论，
-   不是 bug：那种局面本来就要猜。
-3. 结算态（输/赢之后）"插在非雷上的旗"用的是 `wrongblank` 贴图，**不携带旗的类型**，
-   所以那时按计数器反推四类总数会偏小（对局中不受影响）。
-4. 闵可夫斯基模式的 39 个显示值映射见 `atlas.hyper_names()`：正的 `3/7/12/15/21/24/35/48`
-   是独立的 `hnum_*` 贴图，其余正数复用 `num_*`，负数用 `hnum_<|D|>_i`。
-
-## 下一步（按性价比排序）
-
-1. **把大分量的概率做成可信的**：用变量消元 / 桶消元按约束图做树分解求精确边际；
-   或者对每个 (格, 状态) 做一次"加约束后的可满足性"精确枚举（配更好的剪枝）。
-   这是让助手在中级/高级真正好用的关键。
-2. **接入 `--dump`/`--uitest` 做回归**：游戏自带 `--uitest` 能脚本化驱动界面，可当自动化测试台。
-3. **胜率搜索**：现在是"逐格概率 + 启发式"，可以照 `minesweeper_help` 的 `win_rate`
-   加一层"信息合并后最优点击序列"的递归搜索（只在局面小时启用）。
-4. **展开收益**：估"点开后能连带确认多少格"，用于并列候选的取舍。
-
-## 授权
-
-GPL-3.0（见 `LICENSE`）。本项目是复扫雷的**外部**程序：不包含、也不链接游戏的任何
-二进制或素材；运行期从你本地的复扫雷仓库读 `素材/图集.json` 与 `素材/图集.png`。
-复扫雷本身及其素材的授权见其仓库说明（原始扫雷图像素材的权利属于 Microsoft）。
+游戏与图集作为外部输入，不随本项目源码发布。`_lab` 中的截图、日志和测试程序属于本地验证产物。
