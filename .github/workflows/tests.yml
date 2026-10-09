@@ -7,7 +7,7 @@ permissions:
 
 jobs:
   test:
-    # capture.py 直接用 ctypes 调 user32/user32 的窗口消息，Linux/macOS 上 import 即失败，
+    # capture.py 直接用 ctypes 调 user32/gdi32 的窗口消息，Linux/macOS 上 import 即失败，
     # 所以必须跑在 Windows runner 上（README 也写明只支持 Windows）。
     runs-on: windows-latest
     env:
@@ -15,9 +15,9 @@ jobs:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
@@ -30,6 +30,23 @@ jobs:
       - name: 仓库卫生
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+
+          # git grep 用退出码 1 表示「一行都没匹配上」，那是正常结果而不是错误。
+          # 之前这里踩了两个坑：
+          #   1. pwsh 步骤跑完后，GitHub 会拿 $LASTEXITCODE 当步骤退出码；最后一条
+          #      原生命令是 git grep，无命中时留下 1，于是检查全过、整步却判红。
+          #   2. PS 7.3+ 的 $PSNativeCommandUseErrorActionPreference 一旦为真，这个 1
+          #      会被升级成异常。这里显式关掉，让退出码只由下面的 $fail 决定。
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          function Find-Pattern([string]$Pattern) {
+            $out = git grep -n -I -E $Pattern
+            # 0 = 有命中，1 = 无命中，都算正常；再大就是 git 自己出错了，别吞掉
+            if ($LASTEXITCODE -gt 1) { throw "git grep 执行失败（exit $LASTEXITCODE）: $Pattern" }
+            return $out
+          }
+
           $fail = 0
 
           # 被 .gitignore 忽略却仍被跟踪的文件
@@ -43,11 +60,18 @@ jobs:
           if ($big) { Write-Host "::error::跟踪的大文件: $big"; $fail = 1 }
 
           # 特征串扫描（密钥 / 个人绝对路径）
-          $sec = git grep -n -I -E 'sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY' 2>$null
+          # 这两个正则会原样交给 git grep -E：匹配一个字面反斜杠写 \\ 就够，之前写成
+          # \\\\ 等于要求「两个反斜杠」，真实路径永远命中不了，检查形同虚设。
+          $secPattern = 'sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY'
+          $pathPattern = 'C:\\Users\\[A-Za-z]|/home/[a-z]+/|[A-Z]:\\[Dd]esktop'
+
+          $sec = Find-Pattern $secPattern
           if ($sec) { Write-Host "::error::疑似密钥: $sec"; $fail = 1 }
 
-          $path = git grep -n -I -E 'C:\\\\Users\\\\[A-Za-z]|/home/[a-z]+/|[A-Z]:\\\\[Dd]esktop' 2>$null
+          $path = Find-Pattern $pathPattern
           if ($path) { Write-Host "::error::个人绝对路径: $path"; $fail = 1 }
 
+          # 显式收尾：步骤红绿只看仓库检查结果，不看「最后一条命令碰巧怎么样」
           if ($fail) { exit 1 }
           Write-Host "仓库卫生检查通过"
+          exit 0
