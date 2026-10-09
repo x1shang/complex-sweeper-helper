@@ -8,3 +8,13 @@ __pycache__/
 venv/
 .deps/
 settings.local.json
+
+# 打包产物（README 的「已知限制」写明尚未实现独立 EXE 打包；一旦开始，先备好这些规则）
+build/
+dist/
+*.spec
+*.egg-info/
+commit-msg.txt
+
+# 注意：cshelper/vendor/wyc/bg_rc.py（约 10 MB 的 Qt 资源生成物）是有意入库的上游快照，
+# 请勿清理；理由见 THIRD_PARTY.md。

@@ -32,7 +32,9 @@ def main():
     for fname, mode, w, h, z in CASES:
         path = os.path.join(LAB, fname)
         if not os.path.exists(path):
-            print("跳过（缺文件）:", fname)
+            # 缺夹具必须算失败：跳过等于没验证，不能让脚本打印"通过"。
+            print("!! 缺夹具（不能跳过）:", path)
+            ok_all = False
             continue
         img = Image.open(path)
         fit = fit_zoom(img.width, img.height)          # 不给 w/h，纯自动反解

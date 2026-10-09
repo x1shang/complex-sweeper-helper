@@ -132,13 +132,14 @@ def main():
             fails.append("确定性判定与真值矛盾")
 
         # 近似分量：真值应当仍有非零概率（不能被采样的偏差完全排除）
-        approx_bad = 0
+        approx_bad = approx_n = 0
         for r in range(h):
             for c in range(w):
                 if (r, c) in res.prob and mine[r][c] and not res.exact.get((r, c), False):
+                    approx_n += 1
                     if res.ptype[(r, c)][mine[r][c] - 1] <= 0:
                         approx_bad += 1
-        print("近似分量里真值雷型被排成 0 的数量 = %d / 40" % approx_bad)
+        print("近似分量里真值雷型被排成 0 的数量 = %d / %d" % (approx_bad, approx_n))
 
         # 采样分量的"真值不能是 0 或 1"只做提示，不做失败判定
         sat = sum(1 for rc in res.prob if not res.exact.get(rc) and

@@ -1,0 +1,53 @@
+name: tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # capture.py 直接用 ctypes 调 user32/user32 的窗口消息，Linux/macOS 上 import 即失败，
+    # 所以必须跑在 Windows runner 上（README 也写明只支持 Windows）。
+    runs-on: windows-latest
+    env:
+      # 避免中文输出在 GBK 控制台下变成假红
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装测试依赖
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: 单元测试（必须全绿）
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: 仓库卫生
+        shell: pwsh
+        run: |
+          $fail = 0
+
+          # 被 .gitignore 忽略却仍被跟踪的文件
+          $leak = git ls-files -i -c --exclude-standard
+          if ($leak) { Write-Host "::error::漏网之鱼: $leak"; $fail = 1 }
+
+          # 大文件：bg_rc.py 是有意保留的上游快照（见 THIRD_PARTY.md），单独豁免
+          $big = git ls-files |
+                 Where-Object { $_ -ne 'cshelper/vendor/wyc/bg_rc.py' } |
+                 Where-Object { (Test-Path $_) -and (Get-Item $_).Length -gt 5MB }
+          if ($big) { Write-Host "::error::跟踪的大文件: $big"; $fail = 1 }
+
+          # 特征串扫描（密钥 / 个人绝对路径）
+          $sec = git grep -n -I -E 'sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY' 2>$null
+          if ($sec) { Write-Host "::error::疑似密钥: $sec"; $fail = 1 }
+
+          $path = git grep -n -I -E 'C:\\\\Users\\\\[A-Za-z]|/home/[a-z]+/|[A-Z]:\\\\[Dd]esktop' 2>$null
+          if ($path) { Write-Host "::error::个人绝对路径: $path"; $fail = 1 }
+
+          if ($fail) { exit 1 }
+          Write-Host "仓库卫生检查通过"

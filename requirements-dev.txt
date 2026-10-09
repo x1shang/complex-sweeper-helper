@@ -1,0 +1,7 @@
+# 测试运行所需的依赖（CI 与本地单元测试用）
+#
+# 只列跑得起来的部分：PyQt5 不在内——GUI 不进 CI，且 tests/ 下的单元测试不 import 它。
+# 运行期完整依赖见 requirements.txt。
+numpy>=1.24
+Pillow>=9.5
+z3-solver>=4.12
