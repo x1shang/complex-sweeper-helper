@@ -1,0 +1,8 @@
+# 测试素材与产物（含游戏 EXE、渲染图、dump 文本），不入库
+_lab/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
